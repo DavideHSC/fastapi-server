@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+pydantic
+langchain
+langchain-community  # Per embeddings, vector stores, chat_models
+langchain-core
+sentence-transformers # Per HuggingFaceEmbeddings locali
+unstructured[pdf]     # Per il parsing dei PDF
+psycopg2-binary       # Driver Python per PostgreSQL
+pgvector              # Client Python per PGVector (assicurati che l'estensione sia installata in PG!)
+python-dotenv         # Per gestire le variabili d'ambiente
+tiktoken              # Spesso richiesto da langchain per modelli OpenAI-compatibili
