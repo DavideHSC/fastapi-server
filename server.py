@@ -1,68 +1,93 @@
 import os
 import shutil
 from fastapi import FastAPI, File, UploadFile, HTTPException, Depends
-from pydantic import BaseModel, Field
-from typing import List, Optional, cast # Importa cast
+# --- MODIFICA QUI: Aggiungi SecretStr ---
+from pydantic import BaseModel, Field, SecretStr # <--- AGGIUNTO SecretStr
+# --- FINE MODIFICA ---
+from typing import List, Optional, cast
 import uvicorn
 from dotenv import load_dotenv
 
-# Langchain imports (rimangono invariati)
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.vectorstores.pgvector import PGVector
-from langchain_community.docstore.document import Document as LangchainDocument
+# Langchain imports
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_postgres.vectorstores import PGVector
+from langchain_core.documents import Document as LangchainDocument
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.chat_models.openai import ChatOpenAI
+from langchain_openai import ChatOpenAI # Import corretto
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 
+# Per l'estrazione da PDF
 from unstructured.partition.auto import partition as unstructured_partition
 
-load_dotenv()
+print("DEBUG: Inizio importazioni e configurazioni...")
+
+load_dotenv(override=True)
+print("DEBUG: .env caricato (con override=True).")
 
 # --- Configurazione ---
-DB_HOST_ENV = os.getenv("DB_HOST")
-DB_PORT_ENV = os.getenv("DB_PORT")
-DB_USER_ENV = os.getenv("DB_USER")
-DB_PASSWORD_ENV = os.getenv("DB_PASSWORD")
-DB_NAME_ENV = os.getenv("DB_NAME")
-EMBEDDING_MODEL_NAME_ENV = os.getenv("EMBEDDING_MODEL_NAME")
-COLLECTION_NAME_ENV = os.getenv("COLLECTION_NAME")
-OPENROUTER_API_KEY_ENV = os.getenv("OPENROUTER_API_KEY")
-OPENROUTER_MODEL_NAME_ENV = os.getenv("OPENROUTER_MODEL_NAME")
-OPENROUTER_API_BASE_ENV = "https://openrouter.ai/api/v1"
+print("--- DEBUG VALORI GREZZI DA OS.GETENV (DOPO LOAD_DOTENV OVERRIDE) ---")
+DB_HOST_RAW = os.getenv("DB_HOST")
+DB_PORT_RAW = os.getenv("DB_PORT")
+DB_USER_RAW = os.getenv("DB_USER")
+DB_PASSWORD_RAW = os.getenv("DB_PASSWORD")
+DB_NAME_RAW = os.getenv("DB_NAME")
+EMBEDDING_MODEL_NAME_RAW = os.getenv("EMBEDDING_MODEL_NAME")
+COLLECTION_NAME_RAW = os.getenv("COLLECTION_NAME")
+OPENROUTER_API_KEY_RAW = os.getenv("OPENROUTER_API_KEY")
+OPENROUTER_MODEL_NAME_RAW = os.getenv("OPENROUTER_MODEL_NAME")
+OPENROUTER_API_BASE_RAW = os.getenv("OPENROUTER_API_BASE")
 
-# Controllo robusto delle variabili d'ambiente
-env_vars_check = {
-    "DB_HOST": DB_HOST_ENV, "DB_PORT": DB_PORT_ENV, "DB_USER": DB_USER_ENV,
-    "DB_PASSWORD": DB_PASSWORD_ENV, "DB_NAME": DB_NAME_ENV,
-    "EMBEDDING_MODEL_NAME": EMBEDDING_MODEL_NAME_ENV,
-    "COLLECTION_NAME": COLLECTION_NAME_ENV,
-    "OPENROUTER_API_KEY": OPENROUTER_API_KEY_ENV,
-    "OPENROUTER_MODEL_NAME": OPENROUTER_MODEL_NAME_ENV
+print(f"DEBUG_RAW: DB_HOST='{DB_HOST_RAW}' (tipo: {type(DB_HOST_RAW)})")
+print(f"DEBUG_RAW: DB_PORT='{DB_PORT_RAW}' (tipo: {type(DB_PORT_RAW)})")
+print(f"DEBUG_RAW: DB_USER='{DB_USER_RAW}' (tipo: {type(DB_USER_RAW)})")
+# (Password non stampata per sicurezza)
+print(f"DEBUG_RAW: DB_NAME='{DB_NAME_RAW}' (tipo: {type(DB_NAME_RAW)})")
+print(f"DEBUG_RAW: EMBEDDING_MODEL_NAME='{EMBEDDING_MODEL_NAME_RAW}' (tipo: {type(EMBEDDING_MODEL_NAME_RAW)})")
+print(f"DEBUG_RAW: COLLECTION_NAME='{COLLECTION_NAME_RAW}' (tipo: {type(COLLECTION_NAME_RAW)})")
+# (API Key non stampata per sicurezza)
+print(f"DEBUG_RAW: OPENROUTER_MODEL_NAME='{OPENROUTER_MODEL_NAME_RAW}' (tipo: {type(OPENROUTER_MODEL_NAME_RAW)})")
+print(f"DEBUG_RAW: OPENROUTER_API_BASE='{OPENROUTER_API_BASE_RAW}' (tipo: {type(OPENROUTER_API_BASE_RAW)})")
+print("--- FINE DEBUG VALORI GREZZI ---")
+
+def get_env_var(raw_value: Optional[str], default_value: str) -> str:
+    if raw_value is not None:
+        stripped_value = raw_value.strip()
+        if stripped_value:
+            return stripped_value
+    return default_value
+
+DB_HOST = get_env_var(DB_HOST_RAW, "fallback_host")
+DB_PORT = get_env_var(DB_PORT_RAW, "5432")
+DB_USER = get_env_var(DB_USER_RAW, "fallback_user")
+DB_PASSWORD = get_env_var(DB_PASSWORD_RAW, "fallback_pass")
+DB_NAME = get_env_var(DB_NAME_RAW, "fallback_db")
+EMBEDDING_MODEL_NAME = get_env_var(EMBEDDING_MODEL_NAME_RAW, "all-MiniLM-L6-v2")
+COLLECTION_NAME = get_env_var(COLLECTION_NAME_RAW, "my_knowledge_docs")
+OPENROUTER_API_KEY_STR = get_env_var(OPENROUTER_API_KEY_RAW, "fallback_apikey") # Rinominato per chiarezza
+OPENROUTER_MODEL_NAME = get_env_var(OPENROUTER_MODEL_NAME_RAW, "qwen/qwen3-235b-a22b:free")
+OPENROUTER_API_BASE = get_env_var(OPENROUTER_API_BASE_RAW, "https://openrouter.ai/api/v1")
+
+critical_vars_check = {
+    "DB_HOST": DB_HOST, "DB_PORT": DB_PORT, "DB_USER": DB_USER,
+    "DB_PASSWORD": DB_PASSWORD, "DB_NAME": DB_NAME,
+    "OPENROUTER_API_KEY": OPENROUTER_API_KEY_STR # Controlla la stringa originale
 }
-missing_vars = [var_name for var_name, var_value in env_vars_check.items() if not var_value]
+missing_critical_vars = [
+    var_name for var_name, var_value in critical_vars_check.items()
+    if var_value in ["fallback_host", "fallback_user", "fallback_pass", "fallback_db", "fallback_apikey"] or not var_value
+]
 
-if missing_vars:
-    raise ValueError(f"Le seguenti variabili d'ambiente non sono impostate: {', '.join(missing_vars)}. Controlla il tuo file .env")
-
-# Assegnazione dopo il controllo, usando cast per Pylance
-DB_HOST: str = cast(str, DB_HOST_ENV)
-DB_PORT: str = cast(str, DB_PORT_ENV)
-DB_USER: str = cast(str, DB_USER_ENV)
-DB_PASSWORD: str = cast(str, DB_PASSWORD_ENV)
-DB_NAME: str = cast(str, DB_NAME_ENV)
-EMBEDDING_MODEL_NAME: str = cast(str, EMBEDDING_MODEL_NAME_ENV)
-COLLECTION_NAME: str = cast(str, COLLECTION_NAME_ENV)
-OPENROUTER_API_KEY: str = cast(str, OPENROUTER_API_KEY_ENV)
-OPENROUTER_MODEL_NAME: str = cast(str, OPENROUTER_MODEL_NAME_ENV)
-# OPENROUTER_API_BASE è già una stringa letterale, quindi non necessita di cast
-OPENROUTER_API_BASE: str = OPENROUTER_API_BASE_ENV
+if missing_critical_vars:
+    error_message = f"ERRORE CRITICO: Le seguenti variabili d'ambiente essenziali non sono impostate correttamente: {', '.join(missing_critical_vars)}. Controlla il tuo file .env."
+    print(error_message)
+    raise ValueError(error_message)
 
 CONNECTION_STRING = f"postgresql+psycopg2://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+print(f"DEBUG: Connection string COSTRUITA: '{CONNECTION_STRING}'")
 
-# ... (il resto del codice rimane invariato) ...
-# --- Modelli Pydantic ---
+# --- Modelli Pydantic (SecretStr importato sopra) ---
 class UploadResponse(BaseModel):
     filename: str
     message: str
@@ -70,132 +95,171 @@ class UploadResponse(BaseModel):
 
 class QueryRequest(BaseModel):
     question: str
-    top_k: int = Field(default=3)
+    top_k: int = Field(default=3, ge=1, le=10)
 
 class QueryResponse(BaseModel):
     question: str
     answer: str
     source_chunks: List[str]
 
-app = FastAPI(title="Knowledge Base API with PGVector & OpenRouter")
+print("DEBUG: Modelli Pydantic definiti.")
+app = FastAPI(title="Knowledge Base API with PGVector & OpenRouter (langchain-openai)")
+print("DEBUG: Istanza FastAPI creata.")
 
+# --- Inizializzazione Modello di Embedding ---
+embeddings_model: Optional[HuggingFaceEmbeddings] = None
 try:
-    embeddings_model = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL_NAME)
-    print(f"Modello di embedding '{EMBEDDING_MODEL_NAME}' caricato.")
+    print(f"DEBUG: Caricamento modello embedding '{EMBEDDING_MODEL_NAME}' su CPU...")
+    embeddings_model = HuggingFaceEmbeddings(
+        model_name=EMBEDDING_MODEL_NAME,
+        model_kwargs={'device': 'cpu'}
+    )
+    print(f"DEBUG: Modello embedding '{EMBEDDING_MODEL_NAME}' caricato.")
 except Exception as e:
-    print(f"Errore durante il caricamento del modello di embedding: {e}")
-    embeddings_model = None
+    print(f"ERRORE CRITICO: Caricamento modello embedding fallito: {e}")
+    # Considera di sollevare un errore qui o impostare uno stato che impedisca l'avvio completo
+    # raise RuntimeError(f"Impossibile caricare il modello di embedding: {e}")
 
-def get_vector_store():
-    if not embeddings_model:
-        raise HTTPException(status_code=500, detail="Modello di embedding non inizializzato.")
+# --- Funzione get_vector_store ---
+def get_vector_store() -> PGVector:
+    print("DEBUG: Chiamata a get_vector_store (langchain-postgres).")
+    if not embeddings_model: # embeddings_model deve essere disponibile
+        print("ERRORE: embeddings_model non è stato inizializzato correttamente.")
+        raise HTTPException(status_code=503, detail="Modello di embedding non inizializzato correttamente.")
+
+    print(f"DEBUG: Tentativo di inizializzazione PGVector per collection '{COLLECTION_NAME}' (langchain-postgres)...")
     try:
-        store = PGVector(
-            connection_string=CONNECTION_STRING,
-            embedding_function=embeddings_model,
+        vector_store = PGVector(
+            embeddings=embeddings_model,
             collection_name=COLLECTION_NAME,
+            connection=CONNECTION_STRING,
+            # use_jsonb=True, # Considera di abilitarlo per migliori query sui metadati
+            # pre_delete_collection=False, # NON USARE IN PRODUZIONE se True
         )
-        return store
+        print(f"DEBUG: Istanza PGVector creata/configurata per collection '{COLLECTION_NAME}'.")
     except Exception as e:
-        print(f"Errore nella connessione a PGVector: {e}")
-        raise HTTPException(status_code=503, detail=f"Impossibile connettersi al Vector Store: {e}")
+        print(f"ERRORE CRITICO: Creazione PGVector store fallita per collection '{COLLECTION_NAME}': {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=503, detail=f"Impossibile creare/connettersi al Vector Store: {e}")
+    return vector_store
 
+# --- Endpoint /upload_pdf/ ---
 @app.post("/upload_pdf/", response_model=UploadResponse)
 async def upload_pdf(file: UploadFile = File(...), vector_store: PGVector = Depends(get_vector_store)):
+    print(f"DEBUG: Chiamata a /upload_pdf/ per il file '{file.filename}'.")
     if not file.filename:
         raise HTTPException(status_code=400, detail="Nome del file mancante nell'upload.")
-    
-    if not file.filename.endswith(".pdf"):
+    if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Formato file non supportato. Caricare solo PDF.")
-
-    if not embeddings_model:
+    if not embeddings_model: # Controllo ridondante ma sicuro
+        print("ERRORE in /upload_pdf/: Modello di embedding non disponibile.")
         raise HTTPException(status_code=500, detail="Il modello di embedding non è disponibile.")
 
     current_file_name: str = file.filename
-    temp_file_path = f"temp_{current_file_name}"
-    
+    safe_filename = current_file_name.replace('/', '_').replace('\\', '_').replace('..', '')
+    temp_file_path = f"temp_{safe_filename}"
+
     try:
         with open(temp_file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
+        print(f"DEBUG: File '{current_file_name}' salvato temporaneamente in '{temp_file_path}'.")
 
-        print(f"Parsing del file: {temp_file_path}")
+        print(f"DEBUG: Parsing del file: {temp_file_path} con unstructured.")
         elements = unstructured_partition(filename=temp_file_path, strategy="auto")
-        print(f"Numero di elementi estratti da unstructured: {len(elements)}")
+        print(f"DEBUG: Numero di elementi estratti da unstructured: {len(elements)}")
 
-        raw_text_chunks = [el.text for el in elements if el.text.strip()]
+        raw_text_chunks = [el.text for el in elements if hasattr(el, 'text') and el.text and el.text.strip()]
         if not raw_text_chunks:
-            raise HTTPException(status_code=400, detail="Nessun testo estraibile trovato nel PDF.")
+            raise HTTPException(status_code=400, detail="Nessun testo estraibile o valido trovato nel PDF.")
+        print(f"DEBUG: Numero di chunk di testo grezzo validi: {len(raw_text_chunks)}")
 
         full_text = "\n".join(raw_text_chunks)
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
         split_texts = text_splitter.split_text(full_text)
-        
+
         if not split_texts:
              raise HTTPException(status_code=400, detail="Il testo estratto non ha prodotto chunk dopo lo splitting.")
-
-        print(f"Numero di chunk dopo lo splitting: {len(split_texts)}")
+        print(f"DEBUG: Numero di chunk dopo lo splitting del testo: {len(split_texts)}")
 
         documents = [LangchainDocument(page_content=text, metadata={"source": current_file_name}) for text in split_texts]
-
-        vector_store.add_documents(documents)
-        print(f"Aggiunti {len(documents)} chunk al vector store '{COLLECTION_NAME}'.")
+        
+        print(f"DEBUG: Tentativo di aggiungere {len(documents)} documenti alla collection '{COLLECTION_NAME}' usando langchain-postgres...")
+        vector_store.add_documents(documents=documents) 
+        print(f"DEBUG: Aggiunti {len(documents)} chunk alla collection '{COLLECTION_NAME}'.")
 
         return UploadResponse(
             filename=current_file_name,
-            message="PDF processato e aggiunto alla knowledge base.",
+            message="PDF processato e aggiunto alla knowledge base (usando langchain-postgres).",
             chunks_added=len(documents)
         )
-    except HTTPException as e:
+    except HTTPException as e: # Rilancia le eccezioni HTTP specifiche
         raise e
     except Exception as e:
-        print(f"Errore durante il processing del PDF: {e}")
+        print(f"ERRORE: Errore durante il processing del PDF '{current_file_name}': {e}")
+        import traceback
+        traceback.print_exc() # Stampa il traceback completo per un debug migliore
         raise HTTPException(status_code=500, detail=f"Errore durante il processing del PDF: {str(e)}")
     finally:
         if os.path.exists(temp_file_path):
-            os.remove(temp_file_path)
-        await file.close()
+            try:
+                os.remove(temp_file_path)
+                print(f"DEBUG: File temporaneo '{temp_file_path}' rimosso.")
+            except OSError as e_remove:
+                print(f"ATTENZIONE: Impossibile rimuovere il file temporaneo '{temp_file_path}': {e_remove}")
+        if file: # Controlla che 'file' esista prima di chiamare 'close'
+             await file.close()
 
+# --- Endpoint /query/ ---
 @app.post("/query/", response_model=QueryResponse)
 async def query_knowledge_base(request: QueryRequest, vector_store: PGVector = Depends(get_vector_store)):
-    if not embeddings_model:
+    print(f"DEBUG: Chiamata a /query/ con domanda: '{request.question}', top_k={request.top_k}.")
+    if not embeddings_model: # Controllo ridondante ma sicuro
+        print("ERRORE in /query/: Modello di embedding non disponibile.")
         raise HTTPException(status_code=500, detail="Il modello di embedding non è disponibile.")
 
     try:
-        print(f"Ricerca di similarità per la query: '{request.question}' con k={request.top_k}")
-        retrieved_docs = vector_store.similarity_search(request.question, k=request.top_k)
+        print(f"DEBUG: Ricerca di similarità per query: '{request.question}' k={request.top_k} (langchain-postgres)...")
+        retrieved_docs = vector_store.similarity_search(query=request.question, k=request.top_k)
 
         if not retrieved_docs:
+            print(f"DEBUG: Nessun documento rilevante trovato per query: '{request.question}'.")
             return QueryResponse(
                 question=request.question,
-                answer="Non ho trovato informazioni rilevanti nella knowledge base per rispondere alla tua domanda.",
+                answer="Non ho trovato informazioni rilevanti nella knowledge base per rispondere.",
                 source_chunks=[]
             )
+        print(f"DEBUG: Trovati {len(retrieved_docs)} documenti rilevanti.")
 
         context_text = "\n\n---\n\n".join([doc.page_content for doc in retrieved_docs])
-        source_chunks_content = [doc.page_content for doc in retrieved_docs]
+        source_chunks_content = [doc.page_content for doc in retrieved_docs] # Per restituire al client
 
         prompt_template = ChatPromptTemplate.from_messages([
             ("system", "Sei un assistente AI che risponde a domande basandosi ESCLUSIVAMENTE sul contesto fornito. Se l'informazione non è nel contesto, rispondi 'Non ho trovato informazioni sufficienti nel contesto per rispondere'. Non inventare risposte."),
             ("human", "Contesto:\n{context}\n\nDomanda: {question}\n\nRisposta:")
         ])
+        
+        # --- MODIFICA QUI: Conversione api_key a SecretStr ---
+        print(f"DEBUG_LLM: API Key (prime 10): '{str(OPENROUTER_API_KEY_STR)[:10]}...', Base URL: '{OPENROUTER_API_BASE}', Modello: '{OPENROUTER_MODEL_NAME.strip('"')}'")
+        
+        # Prepara api_key come SecretStr o None
+        processed_api_key: Optional[SecretStr] = None
+        if OPENROUTER_API_KEY_STR and OPENROUTER_API_KEY_STR != "fallback_apikey":
+            processed_api_key = SecretStr(OPENROUTER_API_KEY_STR)
 
         llm = ChatOpenAI(
-            model=OPENROUTER_MODEL_NAME,
-            api_key=OPENROUTER_API_KEY,
+            model=OPENROUTER_MODEL_NAME.strip('"'),
+            api_key=processed_api_key,
             base_url=OPENROUTER_API_BASE,
-            temperature=0.1,
-            max_tokens=500
+            temperature=0.1
         )
+        # --- FINE MODIFICA ---
         
-        rag_chain = (
-            {"context": (lambda x: context_text), "question": RunnablePassthrough()}
-            | prompt_template
-            | llm
-            | StrOutputParser()
-        )
+        rag_chain = ({"context": (lambda _: context_text), "question": RunnablePassthrough()} | prompt_template | llm | StrOutputParser())
         
-        print("Invocazione della catena RAG con l'LLM...")
+        print("DEBUG: Invocazione della catena RAG con l'LLM (OpenRouter)...")
         answer = rag_chain.invoke(request.question)
+        print(f"DEBUG: Risposta dall'LLM (primi 100 caratteri): '{answer[:100]}...'")
 
         return QueryResponse(
             question=request.question,
@@ -203,12 +267,18 @@ async def query_knowledge_base(request: QueryRequest, vector_store: PGVector = D
             source_chunks=source_chunks_content
         )
     except Exception as e:
-        print(f"Errore durante la query: {e}")
+        print(f"ERRORE: Errore durante la query '{request.question}': {e}")
+        import traceback
+        traceback.print_exc() # Stampa il traceback completo per un debug migliore
         raise HTTPException(status_code=500, detail=f"Errore durante l'esecuzione della query: {str(e)}")
 
 @app.get("/")
 async def root():
-    return {"message": "Benvenuto nella Knowledge Base API!"}
+    print("DEBUG: Chiamata a GET /")
+    return {"message": "Benvenuto nella Knowledge Base API! (usando langchain-openai & langchain-postgres)"}
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    print("DEBUG: Script in esecuzione come __main__.")
+    print("DEBUG: Tentativo di avvio Uvicorn su host 0.0.0.0 e porta 8000...")
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+    print("DEBUG: Uvicorn dovrebbe essere avviato (questo messaggio non verrà visualizzato se Uvicorn blocca il thread, il che è normale).")
