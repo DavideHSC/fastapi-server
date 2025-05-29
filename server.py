@@ -1,33 +1,31 @@
 import os
 import shutil
 from fastapi import FastAPI, File, UploadFile, HTTPException, Depends
-# --- MODIFICA QUI: Aggiungi SecretStr ---
-from pydantic import BaseModel, Field, SecretStr # <--- AGGIUNTO SecretStr
-# --- FINE MODIFICA ---
+# --- NUOVO IMPORT ---
+from fastapi.middleware.cors import CORSMiddleware
+# --- FINE NUOVO IMPORT ---
+from pydantic import BaseModel, Field, SecretStr
 from typing import List, Optional, cast
 import uvicorn
 from dotenv import load_dotenv
 
-# Langchain imports
+# ... (tutti gli altri tuoi import di Langchain, etc. rimangono qui) ...
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_postgres.vectorstores import PGVector
 from langchain_core.documents import Document as LangchainDocument
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_openai import ChatOpenAI # Import corretto
+from langchain_openai import ChatOpenAI
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
-
-# Per l'estrazione da PDF
 from unstructured.partition.auto import partition as unstructured_partition
 
-print("DEBUG: Inizio importazioni e configurazioni...")
 
+print("DEBUG: Inizio importazioni e configurazioni...")
+# ... (tutta la tua configurazione delle variabili d'ambiente rimane qui) ...
 load_dotenv(override=True)
 print("DEBUG: .env caricato (con override=True).")
 
-# --- Configurazione ---
-print("--- DEBUG VALORI GREZZI DA OS.GETENV (DOPO LOAD_DOTENV OVERRIDE) ---")
 DB_HOST_RAW = os.getenv("DB_HOST")
 DB_PORT_RAW = os.getenv("DB_PORT")
 DB_USER_RAW = os.getenv("DB_USER")
@@ -42,11 +40,9 @@ OPENROUTER_API_BASE_RAW = os.getenv("OPENROUTER_API_BASE")
 print(f"DEBUG_RAW: DB_HOST='{DB_HOST_RAW}' (tipo: {type(DB_HOST_RAW)})")
 print(f"DEBUG_RAW: DB_PORT='{DB_PORT_RAW}' (tipo: {type(DB_PORT_RAW)})")
 print(f"DEBUG_RAW: DB_USER='{DB_USER_RAW}' (tipo: {type(DB_USER_RAW)})")
-# (Password non stampata per sicurezza)
 print(f"DEBUG_RAW: DB_NAME='{DB_NAME_RAW}' (tipo: {type(DB_NAME_RAW)})")
 print(f"DEBUG_RAW: EMBEDDING_MODEL_NAME='{EMBEDDING_MODEL_NAME_RAW}' (tipo: {type(EMBEDDING_MODEL_NAME_RAW)})")
 print(f"DEBUG_RAW: COLLECTION_NAME='{COLLECTION_NAME_RAW}' (tipo: {type(COLLECTION_NAME_RAW)})")
-# (API Key non stampata per sicurezza)
 print(f"DEBUG_RAW: OPENROUTER_MODEL_NAME='{OPENROUTER_MODEL_NAME_RAW}' (tipo: {type(OPENROUTER_MODEL_NAME_RAW)})")
 print(f"DEBUG_RAW: OPENROUTER_API_BASE='{OPENROUTER_API_BASE_RAW}' (tipo: {type(OPENROUTER_API_BASE_RAW)})")
 print("--- FINE DEBUG VALORI GREZZI ---")
@@ -65,14 +61,14 @@ DB_PASSWORD = get_env_var(DB_PASSWORD_RAW, "fallback_pass")
 DB_NAME = get_env_var(DB_NAME_RAW, "fallback_db")
 EMBEDDING_MODEL_NAME = get_env_var(EMBEDDING_MODEL_NAME_RAW, "all-MiniLM-L6-v2")
 COLLECTION_NAME = get_env_var(COLLECTION_NAME_RAW, "my_knowledge_docs")
-OPENROUTER_API_KEY_STR = get_env_var(OPENROUTER_API_KEY_RAW, "fallback_apikey") # Rinominato per chiarezza
+OPENROUTER_API_KEY_STR = get_env_var(OPENROUTER_API_KEY_RAW, "fallback_apikey")
 OPENROUTER_MODEL_NAME = get_env_var(OPENROUTER_MODEL_NAME_RAW, "qwen/qwen3-235b-a22b:free")
 OPENROUTER_API_BASE = get_env_var(OPENROUTER_API_BASE_RAW, "https://openrouter.ai/api/v1")
 
 critical_vars_check = {
     "DB_HOST": DB_HOST, "DB_PORT": DB_PORT, "DB_USER": DB_USER,
     "DB_PASSWORD": DB_PASSWORD, "DB_NAME": DB_NAME,
-    "OPENROUTER_API_KEY": OPENROUTER_API_KEY_STR # Controlla la stringa originale
+    "OPENROUTER_API_KEY": OPENROUTER_API_KEY_STR
 }
 missing_critical_vars = [
     var_name for var_name, var_value in critical_vars_check.items()
@@ -87,7 +83,8 @@ if missing_critical_vars:
 CONNECTION_STRING = f"postgresql+psycopg2://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 print(f"DEBUG: Connection string COSTRUITA: '{CONNECTION_STRING}'")
 
-# --- Modelli Pydantic (SecretStr importato sopra) ---
+
+# --- Modelli Pydantic ---
 class UploadResponse(BaseModel):
     filename: str
     message: str
@@ -103,10 +100,37 @@ class QueryResponse(BaseModel):
     source_chunks: List[str]
 
 print("DEBUG: Modelli Pydantic definiti.")
+
+# Crea l'istanza dell'applicazione FastAPI
 app = FastAPI(title="Knowledge Base API with PGVector & OpenRouter (langchain-openai)")
 print("DEBUG: Istanza FastAPI creata.")
 
+
+# --- CONFIGURAZIONE CORS ---
+# Definisci le origini che possono accedere al tuo backend
+# Sostituisci con la porta effettiva del tuo server di sviluppo frontend
+origins = [
+    "http://localhost", # Se il frontend è servito dalla stessa macchina senza porta specifica (raro per dev server)
+    "http://localhost:3000",  # Esempio per React dev server (Create React App)
+    "http://localhost:5173",  # Esempio per Vite dev server
+    "http://localhost:8080",  # Altra porta comune per dev server (es. Vue CLI)
+    # Aggiungi qui l'URL da cui il tuo frontend `fastapi-server-interface` viene servito durante lo sviluppo
+    # Se usi Live Server in VSCode, potrebbe essere http://127.0.0.1:5500 o simile
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,  # Lista delle origini permesse
+    allow_credentials=True, # Permette i cookie nelle richieste cross-origin (se li usi)
+    allow_methods=["*"],    # Permette tutti i metodi HTTP (GET, POST, PUT, DELETE, ecc.)
+    allow_headers=["*"],    # Permette tutti gli header HTTP
+)
+print(f"DEBUG: CORSMiddleware configurato per permettere le origini: {origins}")
+# --- FINE CONFIGURAZIONE CORS ---
+
+
 # --- Inizializzazione Modello di Embedding ---
+# ... (come prima) ...
 embeddings_model: Optional[HuggingFaceEmbeddings] = None
 try:
     print(f"DEBUG: Caricamento modello embedding '{EMBEDDING_MODEL_NAME}' su CPU...")
@@ -117,13 +141,13 @@ try:
     print(f"DEBUG: Modello embedding '{EMBEDDING_MODEL_NAME}' caricato.")
 except Exception as e:
     print(f"ERRORE CRITICO: Caricamento modello embedding fallito: {e}")
-    # Considera di sollevare un errore qui o impostare uno stato che impedisca l'avvio completo
-    # raise RuntimeError(f"Impossibile caricare il modello di embedding: {e}")
+
 
 # --- Funzione get_vector_store ---
+# ... (come prima) ...
 def get_vector_store() -> PGVector:
     print("DEBUG: Chiamata a get_vector_store (langchain-postgres).")
-    if not embeddings_model: # embeddings_model deve essere disponibile
+    if not embeddings_model: 
         print("ERRORE: embeddings_model non è stato inizializzato correttamente.")
         raise HTTPException(status_code=503, detail="Modello di embedding non inizializzato correttamente.")
 
@@ -133,8 +157,6 @@ def get_vector_store() -> PGVector:
             embeddings=embeddings_model,
             collection_name=COLLECTION_NAME,
             connection=CONNECTION_STRING,
-            # use_jsonb=True, # Considera di abilitarlo per migliori query sui metadati
-            # pre_delete_collection=False, # NON USARE IN PRODUZIONE se True
         )
         print(f"DEBUG: Istanza PGVector creata/configurata per collection '{COLLECTION_NAME}'.")
     except Exception as e:
@@ -145,6 +167,7 @@ def get_vector_store() -> PGVector:
     return vector_store
 
 # --- Endpoint /upload_pdf/ ---
+# ... (come prima) ...
 @app.post("/upload_pdf/", response_model=UploadResponse)
 async def upload_pdf(file: UploadFile = File(...), vector_store: PGVector = Depends(get_vector_store)):
     print(f"DEBUG: Chiamata a /upload_pdf/ per il file '{file.filename}'.")
@@ -152,7 +175,7 @@ async def upload_pdf(file: UploadFile = File(...), vector_store: PGVector = Depe
         raise HTTPException(status_code=400, detail="Nome del file mancante nell'upload.")
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Formato file non supportato. Caricare solo PDF.")
-    if not embeddings_model: # Controllo ridondante ma sicuro
+    if not embeddings_model: 
         print("ERRORE in /upload_pdf/: Modello di embedding non disponibile.")
         raise HTTPException(status_code=500, detail="Il modello di embedding non è disponibile.")
 
@@ -193,12 +216,12 @@ async def upload_pdf(file: UploadFile = File(...), vector_store: PGVector = Depe
             message="PDF processato e aggiunto alla knowledge base (usando langchain-postgres).",
             chunks_added=len(documents)
         )
-    except HTTPException as e: # Rilancia le eccezioni HTTP specifiche
+    except HTTPException as e: 
         raise e
     except Exception as e:
         print(f"ERRORE: Errore durante il processing del PDF '{current_file_name}': {e}")
         import traceback
-        traceback.print_exc() # Stampa il traceback completo per un debug migliore
+        traceback.print_exc() 
         raise HTTPException(status_code=500, detail=f"Errore durante il processing del PDF: {str(e)}")
     finally:
         if os.path.exists(temp_file_path):
@@ -207,14 +230,16 @@ async def upload_pdf(file: UploadFile = File(...), vector_store: PGVector = Depe
                 print(f"DEBUG: File temporaneo '{temp_file_path}' rimosso.")
             except OSError as e_remove:
                 print(f"ATTENZIONE: Impossibile rimuovere il file temporaneo '{temp_file_path}': {e_remove}")
-        if file: # Controlla che 'file' esista prima di chiamare 'close'
+        if file: 
              await file.close()
 
+
 # --- Endpoint /query/ ---
+# ... (come prima, con la correzione per SecretStr) ...
 @app.post("/query/", response_model=QueryResponse)
 async def query_knowledge_base(request: QueryRequest, vector_store: PGVector = Depends(get_vector_store)):
     print(f"DEBUG: Chiamata a /query/ con domanda: '{request.question}', top_k={request.top_k}.")
-    if not embeddings_model: # Controllo ridondante ma sicuro
+    if not embeddings_model: 
         print("ERRORE in /query/: Modello di embedding non disponibile.")
         raise HTTPException(status_code=500, detail="Il modello di embedding non è disponibile.")
 
@@ -232,28 +257,25 @@ async def query_knowledge_base(request: QueryRequest, vector_store: PGVector = D
         print(f"DEBUG: Trovati {len(retrieved_docs)} documenti rilevanti.")
 
         context_text = "\n\n---\n\n".join([doc.page_content for doc in retrieved_docs])
-        source_chunks_content = [doc.page_content for doc in retrieved_docs] # Per restituire al client
+        source_chunks_content = [doc.page_content for doc in retrieved_docs] 
 
         prompt_template = ChatPromptTemplate.from_messages([
             ("system", "Sei un assistente AI che risponde a domande basandosi ESCLUSIVAMENTE sul contesto fornito. Se l'informazione non è nel contesto, rispondi 'Non ho trovato informazioni sufficienti nel contesto per rispondere'. Non inventare risposte."),
             ("human", "Contesto:\n{context}\n\nDomanda: {question}\n\nRisposta:")
         ])
         
-        # --- MODIFICA QUI: Conversione api_key a SecretStr ---
         print(f"DEBUG_LLM: API Key (prime 10): '{str(OPENROUTER_API_KEY_STR)[:10]}...', Base URL: '{OPENROUTER_API_BASE}', Modello: '{OPENROUTER_MODEL_NAME.strip('"')}'")
         
-        # Prepara api_key come SecretStr o None
         processed_api_key: Optional[SecretStr] = None
         if OPENROUTER_API_KEY_STR and OPENROUTER_API_KEY_STR != "fallback_apikey":
             processed_api_key = SecretStr(OPENROUTER_API_KEY_STR)
 
         llm = ChatOpenAI(
             model=OPENROUTER_MODEL_NAME.strip('"'),
-            api_key=processed_api_key,
+            api_key=processed_api_key, 
             base_url=OPENROUTER_API_BASE,
-            temperature=0.1
+            temperature=0.1 
         )
-        # --- FINE MODIFICA ---
         
         rag_chain = ({"context": (lambda _: context_text), "question": RunnablePassthrough()} | prompt_template | llm | StrOutputParser())
         
@@ -269,14 +291,16 @@ async def query_knowledge_base(request: QueryRequest, vector_store: PGVector = D
     except Exception as e:
         print(f"ERRORE: Errore durante la query '{request.question}': {e}")
         import traceback
-        traceback.print_exc() # Stampa il traceback completo per un debug migliore
+        traceback.print_exc() 
         raise HTTPException(status_code=500, detail=f"Errore durante l'esecuzione della query: {str(e)}")
 
+# --- Endpoint Root ---
 @app.get("/")
 async def root():
     print("DEBUG: Chiamata a GET /")
     return {"message": "Benvenuto nella Knowledge Base API! (usando langchain-openai & langchain-postgres)"}
 
+# --- Esecuzione Uvicorn ---
 if __name__ == "__main__":
     print("DEBUG: Script in esecuzione come __main__.")
     print("DEBUG: Tentativo di avvio Uvicorn su host 0.0.0.0 e porta 8000...")
